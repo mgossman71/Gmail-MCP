@@ -209,15 +209,25 @@ export function registerCalendarTools(server: McpServer): void {
         if (o.start !== undefined || o.end !== undefined || o.isAllDay !== undefined) {
           const allDay = o.isAllDay ?? (ev.start?.date !== undefined);
           if (allDay) {
-            if (o.start) ev.start!.date = o.start;
-            ev.end!.date = o.end || (o.start ? addDays(o.start, 1) : ev.end?.date);
+            // Convert/keep all-day. If no explicit date is given, derive it from the
+            // current time so a timed->all-day toggle never leaves the event empty.
+            const newStart = o.start ?? ev.start?.date ?? ev.start?.dateTime?.slice(0, 10);
+            if (newStart && ev.start?.date !== newStart) {
+              ev.start!.date = newStart;
+              ev.end!.date = o.end ?? addDays(newStart, 1);
+            }
             delete ev.start!.dateTime;
             delete ev.end!.dateTime;
           } else {
-            if (o.start) ev.start!.dateTime = o.start;
-            ev.end!.dateTime = o.end || (o.start ? addHours(o.start, 1) : ev.end?.dateTime);
-            delete ev.start!.date;
-            delete ev.end!.date;
+            // Convert/keep timed. If no explicit time is given, reuse the current time;
+            // an all-day->timed toggle with no time can't be invented, so leave it as-is.
+            const newStart = o.start ?? ev.start?.dateTime;
+            if (newStart) {
+              ev.start!.dateTime = newStart;
+              ev.end!.dateTime = o.end ?? (o.start ? addHours(o.start, 1) : ev.end?.dateTime);
+              delete ev.start!.date;
+              delete ev.end!.date;
+            }
           }
         }
         const res = await calendar.events.update({ calendarId: cid, eventId: o.eventId, requestBody: ev });
