@@ -1,0 +1,16 @@
+services:
+  gmail-mcp:
+    build: .
+    container_name: gmail-mcp
+    ports:
+      - "3333:3333"
+    environment:
+      MCP_PORT: "3333"
+      GOOGLE_CREDENTIALS_PATH: /app/credentials.json
+      DEFAULT_CALENDAR: ${DEFAULT_CALENDAR:-primary}
+      GMAIL_ACCOUNT: ${GMAIL_ACCOUNT:-}
+      MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN:-}
+    volumes:
+      - ./credentials.json:/app/credentials.json:ro
+      - ./token.json:/app/token.json
+    restart: unless-stopped

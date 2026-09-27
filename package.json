@@ -1,0 +1,30 @@
+{
+  "name": "gmail-mcp",
+  "version": "1.0.0",
+  "description": "MCP server exposing a Gmail account + Google Calendar over Streamable HTTP",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "auth": "tsx src/auth.ts --interactive",
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "docker": "docker compose up --build"
+  },
+  "dependencies": {
+    "@google-cloud/local-auth": "^3.0.1",
+    "@modelcontextprotocol/sdk": "^1.30.1",
+    "dotenv": "^18.0.4",
+    "express": "^5.2.1",
+    "google-auth-library": "^9.0.0",
+    "googleapis": "^182.0.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3"
+  }
+}
