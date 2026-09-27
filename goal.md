@@ -51,7 +51,7 @@ and its Google Calendar over **Streamable HTTP**. Full read/write on both. Runs 
 ## Progress (multi-session — checkpoint per milestone; read this to resume)
 - [x] 01-scaffold — goal.md + project skeleton
 - [x] 02-auth — auth.ts (both modes)
-- [ ] 03-gmail — 10 Gmail tools
+- [x] 03-gmail — 10 Gmail tools
 - [ ] 04-calendar — 7 Calendar tools
 - [ ] 05-server — index.ts wires 17 tools + HTTP transport
 - [ ] 06-verified — npm install + tsc build passes
