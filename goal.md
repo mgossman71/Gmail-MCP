@@ -55,7 +55,7 @@ and its Google Calendar over **Streamable HTTP**. Full read/write on both. Runs 
 - [x] 04-calendar — 7 Calendar tools
 - [x] 05-server — index.ts wires 17 tools + HTTP transport
 - [x] 06-verified — npm install + tsc build passes
-- [ ] 07-docker — Dockerfile + compose build; container starts; /mcp responds
+- [x] 07-docker — Dockerfile + compose build; container starts; /mcp responds
 - [ ] 08-e2e — full flow via docker compose (after human Google steps)
 
 ## Human-only steps (NOT the agent's job)
