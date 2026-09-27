@@ -6,6 +6,7 @@
   "main": "dist/index.js",
   "scripts": {
     "auth": "tsx src/auth.ts --interactive",
+    "auth:headless": "tsx src/auth.ts --headless",
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "build": "tsc",

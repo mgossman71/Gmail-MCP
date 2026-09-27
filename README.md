@@ -62,6 +62,39 @@ docker compose up
 Server runs at `http://localhost:3333/mcp`. Your `credentials.json` and `token.json`
 are shared into the container automatically.
 
+## Running on a headless server (no browser)
+The **running server needs no browser** — it just reads `credentials.json` +
+`token.json` and refreshes tokens automatically. You only need a browser **once**,
+for the initial authorization. Two options:
+
+**Option A — authorize on another machine, copy the files (simplest):**
+```bash
+# 1. On any machine WITH a browser (e.g. your laptop):
+cd gmail-mcp
+npm install && npm run auth          # opens the browser → saves token.json
+
+# 2. Copy both files to the headless server:
+scp credentials.json token.json you@server:~/gmail-mcp/
+
+# 3. On the server (no browser ever):
+chmod 600 credentials.json token.json   # protect the refresh token
+docker compose up
+```
+
+**Option B — authorize directly on the server over SSH (`npm run auth:headless`):**
+```bash
+# On the server, place credentials.json first (README Part 1), then:
+npm install
+npm run auth:headless
+# It prints a URL and an `ssh -L` command. Run that ssh command from a machine
+# with a browser, open the printed URL there, and the callback tunnels back.
+docker compose up
+```
+
+**Token lifecycle:** access tokens (1 hour) refresh automatically while the server
+runs. Google revokes a refresh token after ~6 months of inactivity or if you sign
+the account out — just re-run auth (Option A or B) and re-copy `token.json`.
+
 ## Connect an MCP client
 Point any MCP client at the endpoint:
 ```json
@@ -80,6 +113,7 @@ Copy `.env.example` to `.env` to customize. Defaults shown:
 | `DEFAULT_CALENDAR` | `primary` | Default calendar for calendar tools |
 | `MCP_PORT` | `3333` | Port the server listens on |
 | `MCP_AUTH_TOKEN` | _(unset)_ | Require this bearer token from clients |
+| `AUTH_CALLBACK_PORT` | `8899` | Callback port for `npm run auth:headless` (forward over SSH) |
 
 ## The 17 tools
 - **Gmail:** `search_messages`, `get_message`, `list_messages`, `list_labels`, `send_email`, `create_draft`, `mark_read`, `mark_unread`, `apply_labels`, `delete_message`
@@ -90,6 +124,8 @@ Copy `.env.example` to `.env` to customize. Defaults shown:
 - **`credentials.json is missing client_id / client_secret`** — wrong file; you need the `"installed"` block from a **Desktop app** client.
 - **`No token.json … run npm run auth`** — run `npm run auth` first.
 - **`Authenticated as X, but GMAIL_ACCOUNT is set to Y`** — wrong account; delete `token.json` and re-run `npm run auth`.
+- **`npm run auth` hangs / does nothing on the server** — there's no browser there. Use `npm run auth:headless` (over SSH) or authorize on another machine and copy `token.json` (see "Running on a headless server").
+- **`Address already in use` (headless)** — set a different `AUTH_CALLBACK_PORT` in `.env` and use the same port in the `ssh -L` command.
 
 ## Progress
 - [x] 01-scaffold
