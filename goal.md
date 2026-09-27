@@ -53,7 +53,7 @@ and its Google Calendar over **Streamable HTTP**. Full read/write on both. Runs 
 - [x] 02-auth — auth.ts (both modes)
 - [x] 03-gmail — 10 Gmail tools
 - [x] 04-calendar — 7 Calendar tools
-- [ ] 05-server — index.ts wires 17 tools + HTTP transport
+- [x] 05-server — index.ts wires 17 tools + HTTP transport
 - [ ] 06-verified — npm install + tsc build passes
 - [ ] 07-docker — Dockerfile + compose build; container starts; /mcp responds
 - [ ] 08-e2e — full flow via docker compose (after human Google steps)
