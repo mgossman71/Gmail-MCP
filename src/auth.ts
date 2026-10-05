@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import http from "node:http";
 import { google } from "googleapis";
@@ -51,16 +51,42 @@ async function assertAccount(client: OAuth2Client): Promise<void> {
 
 // ---- Headless auth (used by the running server / container) ----
 let authPromise: Promise<OAuth2Client> | null = null;
+let tokenMtime = 0;
+
+function readToken(): Record<string, unknown> {
+  return JSON.parse(readFileSync(TOKEN_PATH, "utf-8"));
+}
 
 async function buildAuth(): Promise<OAuth2Client> {
   const client = clientFromKeyfile();
-  if (existsSync(TOKEN_PATH)) {
-    client.setCredentials(JSON.parse(readFileSync(TOKEN_PATH, "utf-8")));
-    await client.getAccessToken(); // refreshes if the cached access token is stale
-  } else {
+  if (!existsSync(TOKEN_PATH)) {
     throw new Error(
       `No token.json at ${TOKEN_PATH}. On the host, run: npm run auth`,
     );
+  }
+  tokenMtime = statSync(TOKEN_PATH).mtimeMs;
+  client.setCredentials(readToken());
+  // Persist refreshed tokens so token.json stays current (keeps the existing
+  // refresh_token if Google doesn't send a new one).
+  client.on("tokens", (tokens) => {
+    try {
+      saveToken({ ...client.credentials, ...tokens });
+      tokenMtime = statSync(TOKEN_PATH).mtimeMs;
+    } catch (e) {
+      log("failed to persist refreshed token:", e);
+    }
+  });
+  try {
+    await client.getAccessToken(); // refreshes if the cached access token is stale
+  } catch (e) {
+    if (String((e as { message?: string })?.message ?? e).includes("invalid_grant")) {
+      throw new Error(
+        "Google rejected the refresh token (invalid_grant) — it expired or was revoked. " +
+          "Re-run `npm run auth` (or `npm run auth:headless`). If this happens every ~7 days, " +
+          "your OAuth consent screen is in Testing mode: publish it to Production (see README).",
+      );
+    }
+    throw e;
   }
   await assertAccount(client);
   return client;
@@ -68,6 +94,11 @@ async function buildAuth(): Promise<OAuth2Client> {
 
 /** Cached, lazily-created authenticated OAuth2Client (refreshes transparently). */
 export function getAuth(): Promise<OAuth2Client> {
+  // Pick up a re-authorized token.json without restarting the server.
+  if (authPromise && existsSync(TOKEN_PATH) && statSync(TOKEN_PATH).mtimeMs !== tokenMtime) {
+    log("token.json changed on disk; reloading credentials");
+    authPromise = null;
+  }
   if (!authPromise) {
     authPromise = buildAuth().catch((e) => {
       authPromise = null; // allow a retry after fixing credentials/token
@@ -92,7 +123,7 @@ async function hasValidToken(): Promise<boolean> {
   if (!existsSync(TOKEN_PATH)) return false;
   try {
     const client = clientFromKeyfile();
-    client.setCredentials(JSON.parse(readFileSync(TOKEN_PATH, "utf-8")));
+    client.setCredentials(readToken());
     await client.getAccessToken(); // refreshes if the cached access token is stale
     await assertAccount(client);
     return true;
@@ -101,8 +132,20 @@ async function hasValidToken(): Promise<boolean> {
   }
 }
 
-function saveToken(credentials: unknown): void {
-  writeFileSync(TOKEN_PATH, JSON.stringify(credentials, null, 2));
+function saveToken(credentials: Record<string, unknown>): void {
+  // Never drop a refresh_token we already have: Google omits it on re-consent.
+  if (!credentials.refresh_token && existsSync(TOKEN_PATH)) {
+    try {
+      const prev = readToken();
+      if (prev.refresh_token) credentials = { ...credentials, refresh_token: prev.refresh_token };
+    } catch {
+      /* ignore unreadable old token */
+    }
+  }
+  if (!credentials.refresh_token) {
+    log("WARNING: no refresh_token received; access will stop after ~1 hour.");
+  }
+  writeFileSync(TOKEN_PATH, JSON.stringify(credentials, null, 2), { mode: 0o600 });
   log(`Saved token to ${TOKEN_PATH}`);
 }
 
@@ -114,7 +157,7 @@ async function runInteractive(): Promise<void> {
   }
   log("Opening your browser to authorize Gmail + Calendar…");
   const client = await authenticate({ keyfilePath: CREDENTIALS_PATH, scopes: SCOPES });
-  saveToken(client.credentials);
+  saveToken({ ...client.credentials });
   log("Done. Run: npm run start   (or)   docker compose up");
 }
 
@@ -131,6 +174,7 @@ async function runHeadless(): Promise<void> {
   const authorizeUrl = client.generateAuthUrl({
     redirect_uri: redirectUri,
     access_type: "offline",
+    prompt: "consent", // always return a refresh_token, even on re-authorization
     scope: SCOPES.join(" "),
   });
 
@@ -167,7 +211,7 @@ async function runHeadless(): Promise<void> {
         }
         const { tokens } = await client.getToken({ code, redirect_uri: redirectUri });
         client.setCredentials(tokens);
-        saveToken(tokens);
+        saveToken({ ...tokens });
         res.end("Authentication successful! Close this tab and return to the server.");
         server.close();
         resolve();

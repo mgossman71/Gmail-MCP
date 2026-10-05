@@ -32,8 +32,19 @@ authorizes your account once.
    - **Add or remove scopes** → add exactly these two:
      - `https://www.googleapis.com/auth/gmail.modify`
      - `https://www.googleapis.com/auth/calendar`
-   - **Save and continue** through the screens. On the last screen, **Testing** is
-     fine (no review needed for personal use).
+   - **Save and continue** through the screens, adding your Gmail address as a test user.
+   - **Fill in Branding** (required before publishing): https://console.cloud.google.com/auth/branding
+     → app name (avoid "Google"/"Gmail" in it), support email, home page
+     `https://github.com/mgossman71/Gmail-MCP`, privacy policy
+     `https://github.com/mgossman71/Gmail-MCP/blob/main/PRIVACY.md`, authorized
+     domain `github.com`, developer email. Skip the logo (it triggers review). **Save**.
+   - **Publish the app:** go to **Audience** (https://console.cloud.google.com/auth/audience)
+     → **Publish app** → **Confirm** so the status reads **In production**.
+     ⚠️ **Don't skip this.** While the app is in **Testing**, Google expires the
+     refresh token every **7 days** and you'd have to re-run auth weekly. No
+     verification/review is needed for personal use: Google just shows a
+     "Google hasn't verified this app" screen during auth → **Advanced** →
+     **Go to <app name> (unsafe)** → **Continue**.
 5. **Create the client and download the file** — https://console.cloud.google.com/apis/credentials/oauth-client
    - **Create Client ID** → Application type: **Desktop app** → name it → **Create**.
    - Click **Download** in the dialog and save the file.
@@ -92,8 +103,10 @@ docker compose up
 ```
 
 **Token lifecycle:** access tokens (1 hour) refresh automatically while the server
-runs. Google revokes a refresh token after ~6 months of inactivity or if you sign
-the account out — just re-run auth (Option A or B) and re-copy `token.json`.
+runs. Google revokes a refresh token after ~6 months of inactivity, if you change
+your password / sign the account out, or **after 7 days if the OAuth app is still
+in Testing** (see Part 1, step 4). Just re-run auth (Option A or B) and re-copy
+`token.json`. The running server picks up the new `token.json` automatically; no restart needed.
 
 ## Connect an MCP client
 Point any MCP client at the endpoint:
@@ -123,6 +136,7 @@ Copy `.env.example` to `.env` to customize. Defaults shown:
 - **`credentials.json not found`** — you haven't downloaded it, or it isn't named exactly `credentials.json` in the project folder.
 - **`credentials.json is missing client_id / client_secret`** — wrong file; you need the `"installed"` block from a **Desktop app** client.
 - **`No token.json … run npm run auth`** — run `npm run auth` first.
+- **`invalid_grant` / auth stops working every ~7 days** — the OAuth app is in **Testing**. Publish it to **In production** (Part 1, step 4), then delete `token.json` and re-run `npm run auth`.
 - **`Authenticated as X, but GMAIL_ACCOUNT is set to Y`** — wrong account; delete `token.json` and re-run `npm run auth`.
 - **`npm run auth` hangs / does nothing on the server** — there's no browser there. Use `npm run auth:headless` (over SSH) or authorize on another machine and copy `token.json` (see "Running on a headless server").
 - **`Address already in use` (headless)** — set a different `AUTH_CALLBACK_PORT` in `.env` and use the same port in the `ssh -L` command.
