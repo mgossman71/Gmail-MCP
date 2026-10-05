@@ -92,14 +92,36 @@ chmod 600 credentials.json token.json   # protect the refresh token
 docker compose up
 ```
 
-**Option B — authorize directly on the server over SSH (`npm run auth:headless`):**
+**Option B — authorize directly on the server (`npm run auth:headless`):**
 ```bash
 # On the server, place credentials.json first (README Part 1), then:
 npm install
-npm run auth:headless
-# It prints a URL and an `ssh -L` command. Run that ssh command from a machine
-# with a browser, open the printed URL there, and the callback tunnels back.
-docker compose up
+npm run auth:headless          # prints a Google URL, then waits
+```
+1. Open the printed URL in a browser on **any** machine (e.g. your laptop) and
+   approve access. (Unverified-app screen → **Advanced** → **Go to … (unsafe)** → **Continue**.)
+2. Google redirects to `http://localhost:8899/oauth2callback?code=…`. The page
+   **fails to load ("can't connect"). That's expected.**
+3. Copy the **full URL from the address bar**, paste it into the server terminal,
+   and press **Enter**. You'll see `Saved token to …/token.json`.
+4. Start the server:
+   ```bash
+   chmod 600 token.json
+   docker compose up -d --build
+   ```
+
+The code in that URL is single-use and expires after ~10 minutes; if it fails,
+just run `npm run auth:headless` again. *(Alternative to pasting: run the printed
+`ssh -L 8899:localhost:8899 you@server` from your laptop first, and the redirect
+tunnels straight back to the server.)*
+
+**Re-authorizing on the server** (expired/revoked token, or a new Google account):
+```bash
+docker compose down     # stop first: token.json is bind-mounted as a single file,
+rm -f token.json        # so deleting it under a running container leaves the old copy in use
+npm run auth:headless   # then paste the redirect URL as above
+grep -q refresh_token token.json && echo "refresh token OK"
+docker compose up -d --build
 ```
 
 **Token lifecycle:** access tokens (1 hour) refresh automatically while the server
@@ -126,7 +148,7 @@ Copy `.env.example` to `.env` to customize. Defaults shown:
 | `DEFAULT_CALENDAR` | `primary` | Default calendar for calendar tools |
 | `MCP_PORT` | `3333` | Port the server listens on |
 | `MCP_AUTH_TOKEN` | _(unset)_ | Require this bearer token from clients |
-| `AUTH_CALLBACK_PORT` | `8899` | Callback port for `npm run auth:headless` (forward over SSH) |
+| `AUTH_CALLBACK_PORT` | `8899` | Callback port in the `npm run auth:headless` redirect URL (only needs forwarding if you use the `ssh -L` tunnel) |
 
 ## The 17 tools
 - **Gmail:** `search_messages`, `get_message`, `list_messages`, `list_labels`, `send_email`, `create_draft`, `mark_read`, `mark_unread`, `apply_labels`, `delete_message`
@@ -139,7 +161,9 @@ Copy `.env.example` to `.env` to customize. Defaults shown:
 - **`invalid_grant` / auth stops working every ~7 days** — the OAuth app is in **Testing**. Publish it to **In production** (Part 1, step 4), then delete `token.json` and re-run `npm run auth`.
 - **`Authenticated as X, but GMAIL_ACCOUNT is set to Y`** — wrong account; delete `token.json` and re-run `npm run auth`.
 - **`npm run auth` hangs / does nothing on the server** — there's no browser there. Use `npm run auth:headless` (over SSH) or authorize on another machine and copy `token.json` (see "Running on a headless server").
-- **`Address already in use` (headless)** — set a different `AUTH_CALLBACK_PORT` in `.env` and use the same port in the `ssh -L` command.
+- **Pasted the URL into `npm run auth:headless` and nothing happened** — you're on an older version that only accepted the `ssh -L` tunnel. `git pull` and retry.
+- **`invalid_grant` right after pasting the redirect URL** — the code was already used or is older than ~10 minutes. Re-run `npm run auth:headless` and paste the new URL promptly.
+- **`Address already in use` (headless)** — harmless if you're pasting the URL. If you're tunneling, set a different `AUTH_CALLBACK_PORT` in `.env` and use the same port in the `ssh -L` command.
 
 ## Progress
 - [x] 01-scaffold
