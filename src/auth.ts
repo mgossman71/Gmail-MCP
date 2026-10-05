@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import http from "node:http";
+import readline from "node:readline";
 import { google } from "googleapis";
 import { OAuth2Client } from "google-auth-library";
 import { authenticate } from "@google-cloud/local-auth";
@@ -180,49 +181,77 @@ async function runHeadless(): Promise<void> {
 
   const hostname = process.env.HOSTNAME || "<server-hostname>";
   log("Headless auth — no browser needed on this machine.");
-  log(`1) From the machine that HAS a browser, forward the callback port:`);
-  log(`     ssh -L ${port}:localhost:${port} <you>@${hostname}`);
-  log(`2) In that machine's browser, open this URL:`);
+  log(`1) On any machine with a browser, open this URL and approve access:`);
   log(`     ${authorizeUrl}`);
-  log(`Waiting for the callback on 127.0.0.1:${port} … (Ctrl-C to cancel)`);
+  log(`2) Google then redirects to http://localhost:${port}/oauth2callback?code=…`);
+  log(`   That page will fail to load ("can't connect") — that's expected.`);
+  log(`   Copy the FULL URL from the browser's address bar and paste it here.`);
+  log(`   (Alternatively, tunnel the callback first:  ssh -L ${port}:localhost:${port} <you>@${hostname})`);
 
   await new Promise<void>((resolve, reject) => {
+    let done = false;
+    const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
     const server = http.createServer(async (req, res) => {
+      const url = new URL(req.url ?? "", `http://localhost:${port}`);
+      if (url.pathname !== "/oauth2callback") {
+        res.statusCode = 404;
+        res.end("Not found");
+        return;
+      }
+      const ok = await finish(url.searchParams);
+      res.end(ok ? "Authentication successful! Close this tab and return to the server." : "Authorization failed — see the server terminal.");
+    });
+
+    function cleanup(): void {
+      done = true;
+      rl.close();
+      server.close();
+    }
+
+    // Exchange the code from either the tunneled callback or a pasted URL.
+    async function finish(params: URLSearchParams): Promise<boolean> {
+      if (done) return false;
+      const error = params.get("error");
+      const code = params.get("code");
+      if (error || !code) {
+        cleanup();
+        reject(new Error(error ? `Authorization error: ${error}` : "No authorization code provided."));
+        return false;
+      }
+      done = true;
       try {
-        const url = new URL(req.url ?? "", `http://localhost:${port}`);
-        if (url.pathname !== "/oauth2callback") {
-          res.statusCode = 404;
-          res.end("Not found");
-          return;
-        }
-        const error = url.searchParams.get("error");
-        const code = url.searchParams.get("code");
-        if (error) {
-          res.end("Authorization rejected.");
-          server.close();
-          reject(new Error(`Authorization error: ${error}`));
-          return;
-        }
-        if (!code) {
-          res.end("No authorization code provided.");
-          server.close();
-          reject(new Error("No authorization code provided."));
-          return;
-        }
         const { tokens } = await client.getToken({ code, redirect_uri: redirectUri });
         client.setCredentials(tokens);
         saveToken({ ...tokens });
-        res.end("Authentication successful! Close this tab and return to the server.");
-        server.close();
+        cleanup();
         resolve();
-        log("Done. Run: docker compose up   (or)   npm run start");
+        log("Done. Run: docker compose up -d --build   (or)   npm run start");
+        return true;
       } catch (e) {
-        server.close();
+        cleanup();
         reject(e);
+        return false;
       }
+    }
+
+    rl.on("line", (line) => {
+      const input = line.trim();
+      if (!input || done) return;
+      let params: URLSearchParams;
+      try {
+        params = input.includes("://") ? new URL(input).searchParams : new URLSearchParams({ code: input });
+      } catch {
+        log("That doesn't look like the redirect URL — paste the full http://localhost… URL.");
+        return;
+      }
+      void finish(params);
     });
-    server.once("error", reject);
+
+    server.once("error", (e) => {
+      log(`Callback listener unavailable (${(e as Error).message}); paste the redirect URL instead.`);
+    });
     server.listen(port, "127.0.0.1");
+    log(`Waiting for the pasted URL or the callback on 127.0.0.1:${port} … (Ctrl-C to cancel)`);
   });
 }
 
