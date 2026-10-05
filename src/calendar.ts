@@ -52,6 +52,10 @@ function addDays(date: string, d: number): string {
   dt.setUTCDate(dt.getUTCDate() + d);
   return dt.toISOString().slice(0, 10);
 }
+function diffDays(a: string, b: string): number {
+  const toUtc = (s: string) => new Date(s.length === 10 ? `${s}T00:00:00Z` : s).getTime();
+  return Math.round((toUtc(b) - toUtc(a)) / 86_400_000);
+}
 
 interface CreateInput {
   summary: string;
@@ -207,27 +211,53 @@ export function registerCalendarTools(server: McpServer): void {
         if (o.location !== undefined) ev.location = o.location;
         if (o.attendees) ev.attendees = o.attendees.map((email) => ({ email }));
         if (o.start !== undefined || o.end !== undefined || o.isAllDay !== undefined) {
-          const allDay = o.isAllDay ?? (ev.start?.date !== undefined);
+          if (!ev.start || !ev.end) {
+            return fail("This event has no start/end times (it may be cancelled), so its times can't be updated.");
+          }
+          const start = ev.start;
+          const end = ev.end;
+          const allDay = o.isAllDay ?? (start.date !== undefined);
           if (allDay) {
-            // Convert/keep all-day. If no explicit date is given, derive it from the
-            // current time so a timed->all-day toggle never leaves the event empty.
-            const newStart = o.start ?? ev.start?.date ?? ev.start?.dateTime?.slice(0, 10);
-            if (newStart && ev.start?.date !== newStart) {
-              ev.start!.date = newStart;
-              ev.end!.date = o.end ?? addDays(newStart, 1);
+            // Convert/keep all-day. Reuse the event's existing start date when no new start
+            // is given, so a timed->all-day toggle never leaves the event empty.
+            const oldStart = start.date ?? start.dateTime?.slice(0, 10);
+            const oldEnd = end.date ?? end.dateTime?.slice(0, 10);
+            const newStart = o.start ?? oldStart;
+            if (!newStart) return fail("Cannot set this event to all-day without a start date; provide start as YYYY-MM-DD.");
+            if (start.date !== newStart) start.date = newStart;
+            delete start.dateTime;
+            if (o.end) {
+              end.date = o.end;
+            } else if (newStart === oldStart && end.date) {
+              // start didn't move and an all-day end already exists: keep it as-is
+            } else if (oldStart && oldEnd) {
+              // start moved (or converting from timed): shift the end by the same delta
+              end.date = addDays(oldEnd, diffDays(oldStart, newStart));
+            } else {
+              end.date = addDays(newStart, 1);
             }
-            delete ev.start!.dateTime;
-            delete ev.end!.dateTime;
+            delete end.dateTime;
           } else {
-            // Convert/keep timed. If no explicit time is given, reuse the current time;
-            // an all-day->timed toggle with no time can't be invented, so leave it as-is.
-            const newStart = o.start ?? ev.start?.dateTime;
-            if (newStart) {
-              ev.start!.dateTime = newStart;
-              ev.end!.dateTime = o.end ?? (o.start ? addHours(o.start, 1) : ev.end?.dateTime);
-              delete ev.start!.date;
-              delete ev.end!.date;
+            // Convert/keep timed. Reuse the event's existing start time when no new one is
+            // given; an all-day->timed toggle with no time can't be invented, so fail.
+            const oldStart = start.dateTime;
+            const oldEnd = end.dateTime;
+            const newStart = o.start ?? oldStart;
+            if (!newStart) return fail("Cannot convert to a timed event without a start time; provide start as an ISO 8601 datetime.");
+            start.dateTime = newStart;
+            delete start.date;
+            const durMs = oldStart && oldEnd ? new Date(oldEnd).getTime() - new Date(oldStart).getTime() : 0;
+            if (o.end) {
+              end.dateTime = o.end;
+            } else if (o.start && oldStart && oldEnd) {
+              // start moved: preserve the original duration
+              end.dateTime = new Date(new Date(newStart).getTime() + durMs).toISOString();
+            } else if (o.start) {
+              // start moved but there's no prior end to measure: default to +1 hour
+              end.dateTime = addHours(newStart, 1);
             }
+            // else: start unchanged and no new end -> keep the existing end as-is
+            delete end.date;
           }
         }
         const res = await calendar.events.update({ calendarId: cid, eventId: o.eventId, requestBody: ev });
