@@ -78,17 +78,28 @@ async function buildAuth(): Promise<OAuth2Client> {
       log("failed to persist refreshed token:", e);
     }
   });
-  try {
-    await client.getAccessToken(); // refreshes if the cached access token is stale
-  } catch (e) {
-    if (String((e as { message?: string })?.message ?? e).includes("invalid_grant")) {
-      throw new Error(
-        "Google rejected the refresh token (invalid_grant) — it expired or was revoked. " +
-          "Re-run `npm run auth` (or `npm run auth:headless`). If this happens every ~7 days, " +
-          "your OAuth consent screen is in Testing mode: publish it to Production (see README).",
-      );
+  if (API_BASE) {
+    // Test harness (GOOGLE_API_BASE_URL points at a mock API): do not touch
+    // Google's real token endpoint. A fake long-lived access token is enough —
+    // the mock never validates it, and the real token.json stays untouched.
+    client.setCredentials({
+      ...client.credentials,
+      access_token: "mock-access-token",
+      expiry_date: Date.now() + 3600_000,
+    });
+  } else {
+    try {
+      await client.getAccessToken(); // refreshes if the cached access token is stale
+    } catch (e) {
+      if (String((e as { message?: string })?.message ?? e).includes("invalid_grant")) {
+        throw new Error(
+          "Google rejected the refresh token (invalid_grant) — it expired or was revoked. " +
+            "Re-run `npm run auth` (or `npm run auth:headless`). If this happens every ~7 days, " +
+            "your OAuth consent screen is in Testing mode: publish it to Production (see README).",
+        );
+      }
+      throw e;
     }
-    throw e;
   }
   await assertAccount(client);
   return client;
