@@ -11,6 +11,7 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "typecheck": "tsc --noEmit",
+    "test": "npm run typecheck && npm run build && node --test test/unit.test.mjs test/smoke.test.mjs",
     "docker": "docker compose up --build"
   },
   "dependencies": {

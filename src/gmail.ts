@@ -111,7 +111,7 @@ function base64UrlDecode(s: string): string {
 
 // base64url-decode, then a quoted-printable pass when the part is actually QP-encoded
 // (per its Content-Transfer-Encoding header, or soft line breaks).
-function decodeBody(data: string, mimeType?: string | null, cte?: string): string {
+export function decodeBody(data: string, mimeType?: string | null, cte?: string): string {
   let s = base64UrlDecode(data);
   const isQp = cte?.toLowerCase() === "quoted-printable" || /=\r?\n/.test(s);
   if (mimeType?.startsWith("text/") && isQp) {
@@ -127,7 +127,7 @@ function header(hs: Header[] | undefined, name: string): string {
 }
 
 /** Structured row for JSON output / internal use. */
-function toRow(item: ListedMessage): Record<string, unknown> {
+export function toRow(item: ListedMessage): Record<string, unknown> {
   const m = item.m;
   const hs = m.payload?.headers;
   const labels = m.labelIds ?? [];
@@ -146,7 +146,7 @@ function toRow(item: ListedMessage): Record<string, unknown> {
   };
 }
 
-function summarize(items: ListedMessage[]): string {
+export function summarize(items: ListedMessage[]): string {
   if (!items.length) return "No messages found.";
   return items
     .map((item, i) => {
