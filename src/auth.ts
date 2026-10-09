@@ -39,7 +39,7 @@ function clientFromKeyfile(): OAuth2Client {
 async function assertAccount(client: OAuth2Client): Promise<void> {
   if (!REQUIRED_ACCOUNT) return;
   const { data } = await google
-    .gmail({ version: "v1", auth: client })
+    .gmail({ version: "v1", auth: client, ...BASE_OPTS })
     .users.getProfile({ userId: "me" });
   const email = (data.emailAddress || "").toLowerCase();
   if (email !== REQUIRED_ACCOUNT) {
@@ -47,6 +47,7 @@ async function assertAccount(client: OAuth2Client): Promise<void> {
       `Authenticated as ${email}, but GMAIL_ACCOUNT is set to ${REQUIRED_ACCOUNT}.`,
     );
   }
+  cacheAuthenticatedEmail(email);
   log(`authenticated as ${email}`);
 }
 
@@ -93,6 +94,69 @@ async function buildAuth(): Promise<OAuth2Client> {
   return client;
 }
 
+// ---- Health info for /healthz (offline: no Google round-trips) ----
+let lastAuthenticatedEmail: string | null = null;
+function cacheAuthenticatedEmail(email: string): void {
+  lastAuthenticatedEmail = email;
+}
+
+/**
+ * The email of the account the server is bound to: from the last verified
+ * profile fetch when one happened, otherwise from the token's own `email`
+ * field (set at auth time), otherwise null.
+ */
+export function getAuthenticatedEmail(): string | null {
+  if (lastAuthenticatedEmail) return lastAuthenticatedEmail;
+  const token = readTokenSafe();
+  return typeof token.email === "string" ? token.email : null;
+}
+
+function readTokenSafe(): Record<string, unknown> {
+  try {
+    return JSON.parse(readFileSync(TOKEN_PATH, "utf-8"));
+  } catch {
+    return {};
+  }
+}
+
+export interface HealthInfo {
+  expectedAccount: string | null;
+  authenticatedEmail: string | null;
+  scopes: { requested: string[]; granted: string[]; missing: string[] };
+}
+
+/** Offline summary of account + scope state for the /healthz endpoint. */
+export function getHealthInfo(): HealthInfo {
+  const requested = SCOPES.slice();
+  let granted: string[] = [];
+  try {
+    granted = String(readTokenSafe().scope ?? "")
+      .split(/\s+/)
+      .filter(Boolean);
+  } catch {
+    /* no token yet */
+  }
+  return {
+    expectedAccount: REQUIRED_ACCOUNT,
+    authenticatedEmail: getAuthenticatedEmail(),
+    scopes: { requested, granted, missing: requested.filter((s) => !granted.includes(s)) },
+  };
+}
+
+/**
+ * Best-effort, non-blocking account verification: fetches the profile to learn
+ * (and cache) the signed-in email. Errors are swallowed — healthz must never
+ * fail or stall because of it.
+ */
+export function verifyAccountForHealth(): void {
+  if (lastAuthenticatedEmail) return;
+  void getAuth()
+    .then(() => getGmail())
+    .then((gmail) => gmail.users.getProfile({ userId: "me" }))
+    .then((res) => cacheAuthenticatedEmail(res.data.emailAddress ?? ""))
+    .catch((e) => log("account verification for healthz skipped:", e instanceof Error ? e.message : e));
+}
+
 /** Cached, lazily-created authenticated OAuth2Client (refreshes transparently). */
 export function getAuth(): Promise<OAuth2Client> {
   // Pick up a re-authorized token.json without restarting the server.
@@ -109,14 +173,18 @@ export function getAuth(): Promise<OAuth2Client> {
   return authPromise;
 }
 
+// Optional base URL override (used for tests / custom Google API frontends).
+const API_BASE = (process.env.GOOGLE_API_BASE_URL || "").replace(/\/$/, "");
+const BASE_OPTS: Record<string, string> = API_BASE ? { rootUrl: API_BASE + "/" } : {};
+
 export async function getGmail() {
   const auth = await getAuth();
-  return google.gmail({ version: "v1", auth });
+  return google.gmail({ version: "v1", auth, ...BASE_OPTS });
 }
 
 export async function getCalendar() {
   const auth = await getAuth();
-  return google.calendar({ version: "v3", auth });
+  return google.calendar({ version: "v3", auth, ...BASE_OPTS });
 }
 
 // ---- One-time authorization (produces token.json) ----

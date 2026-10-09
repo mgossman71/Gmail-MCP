@@ -6,6 +6,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import type { Response } from "express";
 import { registerGmailTools } from "./gmail.js";
 import { registerCalendarTools } from "./calendar.js";
+import { getHealthInfo, verifyAccountForHealth } from "./auth.js";
 
 const PORT = Number(process.env.MCP_PORT || 3333);
 const HOST = process.env.MCP_HOST || "0.0.0.0";
@@ -78,12 +79,26 @@ app.all("/mcp", async (req, res) => {
 });
 
 // Lightweight liveness probe (does not require an MCP session or Google auth).
+// `account` identifies which mailbox this port is bound to (disambiguates the
+// two-instance setup); `scopes.missing` non-empty means re-auth is needed.
 app.get("/healthz", (_req, res) => {
-  res.status(200).json({ ok: true, name: "gmail-mcp", endpoint: "/mcp" });
+  const info = getHealthInfo();
+  res.status(200).json({
+    ok: true,
+    name: "gmail-mcp",
+    endpoint: "/mcp",
+    port: PORT,
+    account: {
+      expected: info.expectedAccount,
+      authenticated: info.authenticatedEmail,
+    },
+    scopes: info.scopes,
+  });
 });
 
 app.listen(PORT, HOST, () => {
   log(`MCP server listening on http://${HOST}:${PORT}/mcp`);
   log(`17 tools registered (10 Gmail + 7 Calendar)`);
   if (!MCP_AUTH_TOKEN) log("no MCP_AUTH_TOKEN set; endpoint is unauthenticated (ok for local-only use)");
+  verifyAccountForHealth(); // best-effort; fills /healthz account.authenticated
 });

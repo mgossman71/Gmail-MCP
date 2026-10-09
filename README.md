@@ -149,10 +149,48 @@ Copy `.env.example` to `.env` to customize. Defaults shown:
 | `MCP_PORT` | `3333` | Port the server listens on |
 | `MCP_AUTH_TOKEN` | _(unset)_ | Require this bearer token from clients |
 | `AUTH_CALLBACK_PORT` | `8899` | Callback port in the `npm run auth:headless` redirect URL (only needs forwarding if you use the `ssh -L` tunnel) |
+| `GOOGLE_API_BASE_URL` | _(unset)_ | Route Gmail/Calendar API calls to a different base URL (test hook; usually unset) |
+
+### `GET /healthz` (unauthenticated)
+```bash
+curl http://localhost:3333/healthz
+```
+```json
+{
+  "ok": true,
+  "name": "gmail-mcp",
+  "endpoint": "/mcp",
+  "port": 3333,
+  "account": { "expected": "you@gmail.com", "authenticated": "you@gmail.com" },
+  "scopes": { "requested": ["…gmail.modify", "…calendar"], "granted": ["…"], "missing": [] }
+}
+```
+- **`account.authenticated`** — which mailbox this port is actually bound to
+  (`expected` is the `GMAIL_ACCOUNT` env). With two instances on different
+  ports, this is how you tell them apart. It fills in a moment after startup
+  (or after the first tool call) once the account is verified.
+- **`scopes.missing`** — non-empty (or a tool error mentioning
+  "insufficient authentication scopes") means the token lacks a requested
+  scope: re-run `npm run auth` (or `auth:headless`) and copy the new
+  `token.json`.
 
 ## The 17 tools
 - **Gmail:** `search_messages`, `get_message`, `list_messages`, `list_labels`, `send_email`, `create_draft`, `mark_read`, `mark_unread`, `apply_labels`, `delete_message`
 - **Calendar:** `list_calendars`, `list_events`, `get_event`, `create_event`, `update_event`, `delete_event`, `find_free_time`
+
+**Reading mail in one call:** `list_messages` / `search_messages` return the id,
+from, to, subject, date, snippet, and unread/starred state of every message —
+you don't need a `get_message` call per message just to find out who sent what.
+Call `get_message` only when you need the body.
+
+**JSON output:** the read tools (`search_messages`, `list_messages`,
+`get_message`, `list_labels`) accept `format: "json"` (default `"text"`) and
+then return a machine-parseable JSON payload instead of the human-readable
+summary. Error responses always set `isError: true`.
+
+**Labels are flexible:** `apply_labels` accepts either a single label
+(`"STARRED"`) or an array (`["INBOX", "SENT"]`) for `addLabelIds` /
+`removeLabelIds`.
 
 ## Troubleshooting
 - **`credentials.json not found`** — you haven't downloaded it, or it isn't named exactly `credentials.json` in the project folder.

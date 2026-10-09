@@ -15,11 +15,41 @@ type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean
 function text(s: string): ToolResult {
   return { content: [{ type: "text", text: s }] };
 }
-function fail(e: unknown): ToolResult {
-  return { content: [{ type: "text", text: `Error: ${e instanceof Error ? e.message : String(e)}` }], isError: true };
+
+// Turn Google API failures into messages that say what to DO about them.
+function describeError(e: unknown): string {
+  const msg = e instanceof Error ? e.message : String(e);
+  const lower = msg.toLowerCase();
+  if (
+    (lower.includes("insufficient") && lower.includes("scope")) ||
+    lower.includes("permission denied") ||
+    lower.includes(" 403")
+  ) {
+    return (
+      msg +
+      " — this looks like a missing OAuth scope. Check the granted/missing scopes at /healthz; " +
+      "if any requested scope is missing, re-run `npm run auth` (or `npm run auth:headless`) with full scopes."
+    );
+  }
+  if (lower.includes("invalid_grant") || lower.includes("rejected the refresh token")) {
+    return msg; // already carries its own remediation steps
+  }
+  if (lower.includes("invalid label") || lower.includes("not found") || lower.includes("invalid argument")) {
+    return msg + " — check the input (label names/ids and message ids come from gmail_list_labels / list results).";
+  }
+  return msg;
 }
 
-const LIST_HEADERS = ["Subject", "From", "Date"];
+function fail(e: unknown): ToolResult {
+  return { content: [{ type: "text", text: `Error: ${describeError(e)}` }], isError: true };
+}
+
+const LIST_HEADERS = ["Subject", "From", "To", "Date"];
+
+const formatSchema = z
+  .enum(["text", "json"])
+  .default("text")
+  .describe("Output format: 'text' = human-readable (default); 'json' = a pure JSON payload you can parse directly");
 
 // metadataHeaders is a real Gmail API param that the googleapis TS types omit
 async function listMessages(
@@ -40,10 +70,12 @@ function base64UrlDecode(s: string): string {
   return Buffer.from(s.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf-8");
 }
 
-// base64url-decode, then a safe quoted-printable pass (only if soft line breaks are present)
-function decodeBody(data: string, mimeType?: string | null): string {
+// base64url-decode, then a quoted-printable pass when the part is actually QP-encoded
+// (per its Content-Transfer-Encoding header, or soft line breaks).
+function decodeBody(data: string, mimeType?: string | null, cte?: string): string {
   let s = base64UrlDecode(data);
-  if (mimeType?.startsWith("text/") && /=\r?\n/.test(s)) {
+  const isQp = cte?.toLowerCase() === "quoted-printable" || /=\r?\n/.test(s);
+  if (mimeType?.startsWith("text/") && isQp) {
     s = s
       .replace(/=\r?\n/g, "")
       .replace(/=([0-9A-Fa-f]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
@@ -55,19 +87,50 @@ function header(hs: Header[] | undefined, name: string): string {
   return hs?.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value ?? "";
 }
 
-function summarize(messages: unknown[]): string {
+type ListMessage = {
+  id: string;
+  threadId?: string;
+  snippet?: string;
+  labelIds?: string[];
+  payload?: { headers?: Header[] };
+};
+
+/** Structured row for JSON output / internal use. */
+function toRow(m: ListMessage): Record<string, unknown> {
+  const hs = m.payload?.headers;
+  const labels = m.labelIds ?? [];
+  return {
+    id: m.id,
+    threadId: m.threadId ?? null,
+    from: header(hs, "From") || null,
+    to: header(hs, "To") || null,
+    subject: header(hs, "Subject") || null,
+    date: header(hs, "Date") || null,
+    snippet: m.snippet ?? null,
+    labels,
+    unread: labels.includes("UNREAD"),
+    starred: labels.includes("STARRED"),
+  };
+}
+
+function summarize(messages: ListMessage[]): string {
   if (!messages.length) return "No messages found.";
   return messages
     .map((m, i) => {
-      const mm = m as { id: string; threadId?: string; snippet?: string; payload?: { headers?: Header[] } };
+      const r = toRow(m);
+      const flags = [r.unread ? "UNREAD" : "", r.starred ? "STARRED" : ""].filter(Boolean).join(" ");
       return [
-        `${i + 1}. [id=${mm.id}${mm.threadId ? ` thread=${mm.threadId}` : ""}] ${header(mm.payload?.headers, "Date")}`,
-        `   From: ${header(mm.payload?.headers, "From") || "?"}`,
-        `   Subject: ${header(mm.payload?.headers, "Subject") || "(no subject)"}`,
-        mm.snippet ? `   ${mm.snippet}` : "",
+        `${i + 1}. [id=${m.id}${m.threadId ? ` thread=${m.threadId}` : ""}]${flags ? ` (${flags})` : ""} ${r.date ?? ""}`.trimEnd(),
+        `   From: ${r.from ?? "?"}`,
+        `   Subject: ${r.subject ?? "(no subject)"}`,
+        r.snippet ? `   ${r.snippet}` : "",
       ].filter(Boolean).join("\n");
     })
     .join("\n\n");
+}
+
+function jsonResult(value: unknown): ToolResult {
+  return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }] };
 }
 
 function findPart(part: Part | undefined, type: string): Part | null {
@@ -78,6 +141,18 @@ function findPart(part: Part | undefined, type: string): Part | null {
     if (r) return r;
   }
   return null;
+}
+
+/** Recursively collect attachment filenames (falls back to the mime type). */
+function collectAttachments(part: Part | undefined, out: string[] = []): string[] {
+  if (!part) return out;
+  if (part.body?.attachmentId) {
+    const disp = part.headers?.find((h) => h.name.toLowerCase() === "content-disposition")?.value ?? "";
+    const m = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disp);
+    out.push(m ? m[1] : (part.mimeType ?? "attachment"));
+  }
+  for (const p of part.parts ?? []) collectAttachments(p, out);
+  return out;
 }
 
 type Attachment = { filename: string; mimeType: string; data: string };
@@ -144,17 +219,18 @@ export function registerGmailTools(server: McpServer): void {
     {
       title: "Search Gmail",
       description:
-        "Search messages using Gmail query syntax. Examples: 'from:bob@example.com', 'subject:invoice after:2024/01/01', 'is:unread has:attachment newer_than:30d', 'in:inbox label:work', 'before:2023/12/31 has:attachment size>1M'.",
+        "Search messages using Gmail query syntax. Examples: 'from:bob@example.com', 'subject:invoice after:2024/01/01', 'is:unread has:attachment newer_than:30d', 'in:inbox label:work', 'before:2023/12/31 has:attachment size>1M'. Each result includes id, from, to, subject, date, snippet, and unread/starred state in this single call — only call gmail_get_message when you need the full body.",
       inputSchema: {
         q: z.string().describe("Gmail search query string"),
         maxResults: z.number().int().min(1).max(100).default(10).describe("Max messages to return (default 10)"),
+        format: formatSchema,
       },
     },
-    async ({ q, maxResults }) => {
+    async ({ q, maxResults, format }) => {
       try {
         const gmail = await getGmail();
-        const msgs = await listMessages(gmail, { q, maxResults });
-        return text(summarize(msgs));
+        const msgs = (await listMessages(gmail, { q, maxResults })) as ListMessage[];
+        return format === "json" ? jsonResult(msgs.map(toRow)) : text(summarize(msgs));
       } catch (e) {
         return fail(e);
       }
@@ -166,20 +242,37 @@ export function registerGmailTools(server: McpServer): void {
     {
       title: "Read a message",
       description: "Fetch a full message (headers + body). Provide the message id from a search/list result.",
-      inputSchema: { messageId: z.string().describe("The message id") },
+      inputSchema: { messageId: z.string().describe("The message id"), format: formatSchema },
     },
-    async ({ messageId }) => {
+    async ({ messageId, format }) => {
       try {
         const gmail = await getGmail();
         const res = await gmail.users.messages.get({ userId: "me", id: messageId, format: "full" });
-        const m = res.data as { payload?: Part };
+        const m = res.data as { id?: string; threadId?: string; labelIds?: string[]; snippet?: string; payload?: Part };
         const hs = m.payload?.headers ?? [];
-        const headerStr = hs.map((h) => `${h.name}: ${h.value}`).join("\n");
         const chosen = findPart(m.payload, "text/plain") ?? findPart(m.payload, "text/html");
         let body = "";
-        if (chosen?.body?.data) body = decodeBody(chosen.body.data, chosen.mimeType);
-        else if (m.payload?.body?.data) body = decodeBody(m.payload.body.data, m.payload.mimeType);
-        const attachments = (m.payload?.body?.attachmentId ? ["(has separately-stored attachment)"] : []);
+        if (chosen?.body?.data)
+  body = decodeBody(chosen.body.data, chosen.mimeType, chosen.headers?.find((h) => h.name.toLowerCase() === "content-transfer-encoding")?.value);
+        else if (m.payload?.body?.data)
+  body = decodeBody(m.payload.body.data, m.payload.mimeType, m.payload.headers?.find((h) => h.name.toLowerCase() === "content-transfer-encoding")?.value);
+        const attachments = collectAttachments(m.payload);
+        if (format === "json") {
+          return jsonResult({
+            id: m.id ?? messageId,
+            threadId: m.threadId ?? null,
+            labels: m.labelIds ?? [],
+            from: header(hs, "From") || null,
+            to: header(hs, "To") || null,
+            subject: header(hs, "Subject") || null,
+            date: header(hs, "Date") || null,
+            snippet: m.snippet ?? null,
+            bodyMime: chosen?.mimeType ?? null,
+            body: body || null,
+            attachments,
+          });
+        }
+        const headerStr = hs.map((h) => `${h.name}: ${h.value}`).join("\n");
         return text(`Headers:\n${headerStr}\n\nBody:\n${body || "(no body)"}\n\nAttachments: ${attachments.join(", ") || "none"}`);
       } catch (e) {
         return fail(e);
@@ -191,38 +284,52 @@ export function registerGmailTools(server: McpServer): void {
     "gmail_list_messages",
     {
       title: "List messages",
-      description: "List recent messages from a label/folder (default INBOX). Use gmail_search_messages for full-text search.",
+      description:
+        "List recent messages from a label/folder (default INBOX). Each result includes id, from, to, subject, date, snippet, and unread/starred state in this single call. Use gmail_search_messages for full-text search.",
       inputSchema: {
         labelId: z.string().default("INBOX").describe("Label/folder id: INBOX, SENT, DRAFT, STARRED, TRASH, or a custom label name"),
         maxResults: z.number().int().min(1).max(100).default(10).describe("Max messages (default 10)"),
+        format: formatSchema,
       },
     },
-    async ({ labelId, maxResults }) => {
+    async ({ labelId, maxResults, format }) => {
       try {
         const gmail = await getGmail();
-        const msgs = await listMessages(gmail, { labelIds: [labelId], maxResults });
-        return text(summarize(msgs));
+        const msgs = (await listMessages(gmail, { labelIds: [labelId], maxResults })) as ListMessage[];
+        return format === "json" ? jsonResult(msgs.map(toRow)) : text(summarize(msgs));
       } catch (e) {
         return fail(e);
       }
     },
   );
 
-  server.registerTool("gmail_list_labels", {
-    title: "List labels",
-    description: "List all labels/folders in the mailbox with ids and unread counts.",
-  }, async () => {
-    try {
-      const gmail = await getGmail();
-      const res = await gmail.users.labels.list({ userId: "me" });
-      const lines = ((res.data.labels ?? []) as { name: string; id: string; messagesUnread?: number; messagesTotal?: number }[]).map(
-        (l) => `- ${l.name} [id=${l.id}]${l.messagesUnread ? ` (${l.messagesUnread} unread)` : l.messagesTotal ? ` (${l.messagesTotal} total)` : ""}`,
-      );
-      return text(lines.length ? lines.join("\n") : "No labels.");
-    } catch (e) {
-      return fail(e);
-    }
-  });
+  server.registerTool(
+    "gmail_list_labels",
+    {
+      title: "List labels",
+      description: "List all labels/folders in the mailbox with ids and unread counts.",
+      inputSchema: { format: formatSchema },
+    },
+    async ({ format }) => {
+      try {
+        const gmail = await getGmail();
+        const res = await gmail.users.labels.list({ userId: "me" });
+        const labels = (res.data.labels ?? []) as {
+          name: string;
+          id: string;
+          messagesUnread?: number;
+          messagesTotal?: number;
+        }[];
+        if (format === "json") return jsonResult(labels);
+        const lines = labels.map(
+          (l) => `- ${l.name} [id=${l.id}]${l.messagesUnread ? ` (${l.messagesUnread} unread)` : l.messagesTotal ? ` (${l.messagesTotal} total)` : ""}`,
+        );
+        return text(lines.length ? lines.join("\n") : "No labels.");
+      } catch (e) {
+        return fail(e);
+      }
+    },
+  );
 
   server.registerTool(
     "gmail_send_email",
@@ -296,14 +403,22 @@ export function registerGmailTools(server: McpServer): void {
         "Add/remove labels on a message. Common: archive = removeLabelIds ['INBOX']; star = addLabelIds ['STARRED']; move to a folder = addLabelIds [folder] and removeLabelIds ['INBOX'].",
       inputSchema: {
         messageId: z.string(),
-        addLabelIds: z.array(z.string()).optional().describe("Label ids/names to add"),
-        removeLabelIds: z.array(z.string()).optional().describe("Label ids/names to remove"),
+        addLabelIds: z
+          .union([z.string(), z.array(z.string())])
+          .optional()
+          .describe("Label id(s) or name(s) to add — a single value (\"STARRED\") or an array (['INBOX'])"),
+        removeLabelIds: z
+          .union([z.string(), z.array(z.string())])
+          .optional()
+          .describe("Label id(s) or name(s) to remove — a single value (\"INBOX\") or an array (['STARRED'])"),
       },
     },
     async ({ messageId, addLabelIds, removeLabelIds }) => {
       try {
         const gmail = await getGmail();
-        const res = await gmail.users.messages.modify({ userId: "me", id: messageId, requestBody: { addLabelIds, removeLabelIds } });
+        const add = addLabelIds ? (Array.isArray(addLabelIds) ? addLabelIds : [addLabelIds]) : undefined;
+        const remove = removeLabelIds ? (Array.isArray(removeLabelIds) ? removeLabelIds : [removeLabelIds]) : undefined;
+        const res = await gmail.users.messages.modify({ userId: "me", id: messageId, requestBody: { addLabelIds: add, removeLabelIds: remove } });
         return text(`Updated. labels=${(res.data.labelIds ?? []).join(", ") || "(none)"}`);
       } catch (e) {
         return fail(e);
