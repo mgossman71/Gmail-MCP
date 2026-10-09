@@ -51,11 +51,24 @@ const formatSchema = z
   .default("text")
   .describe("Output format: 'text' = human-readable (default); 'json' = a pure JSON payload you can parse directly");
 
+type ListMessage = {
+  id: string;
+  threadId?: string;
+  snippet?: string;
+  labelIds?: string[];
+  payload?: { headers?: Header[] };
+};
+
+/** A listed message plus whether its enrichment fields were actually returned by the API. */
+type ListedMessage = { m: ListMessage; enriched: boolean };
+
+const hasEnrichment = (m: ListMessage): boolean => Boolean(m.payload?.headers?.length);
+
 // metadataHeaders is a real Gmail API param that the googleapis TS types omit
 async function listMessages(
   gmail: GmailClient,
   opts: { q?: string; labelIds?: string[]; maxResults: number },
-): Promise<any[]> {
+): Promise<ListedMessage[]> {
   const res = await gmail.users.messages.list({
     userId: "me",
     q: opts.q,
@@ -63,7 +76,33 @@ async function listMessages(
     maxResults: opts.maxResults,
     metadataHeaders: LIST_HEADERS,
   } as any);
-  return res.data?.messages ?? [];
+  const msgs = (res.data?.messages ?? []) as unknown as ListMessage[];
+  await backfillEnrichment(gmail, msgs);
+  return msgs.map((m) => ({ m, enriched: hasEnrichment(m) }));
+}
+
+// Some list responses come back as bare rows (no payload.headers / no snippet).
+// Backfill those rows with cheap per-message metadata fetches (full headers +
+// snippet, no bodies). Failures degrade to the bare row for that message only.
+async function backfillEnrichment(gmail: GmailClient, msgs: ListMessage[]): Promise<void> {
+  const needs = msgs.filter((m) => !hasEnrichment(m) || !m.snippet);
+  if (!needs.length) return;
+  const BATCH = 10;
+  for (let i = 0; i < needs.length; i += BATCH) {
+    const chunk = needs.slice(i, i + BATCH);
+    const results = await Promise.allSettled(
+      chunk.map((m) =>
+        gmail.users.messages
+          .get({ userId: "me", id: m.id, format: "metadata" } as any)
+          .then((r) => r.data),
+      ),
+    );
+    results.forEach((r, j) => {
+      if (r.status !== "fulfilled" || !r.value) return;
+      if (r.value.payload?.headers) chunk[j].payload = { ...chunk[j].payload, headers: r.value.payload.headers as Header[] };
+      if (r.value.snippet && !chunk[j].snippet) chunk[j].snippet = r.value.snippet;
+    });
+  }
 }
 
 function base64UrlDecode(s: string): string {
@@ -87,16 +126,9 @@ function header(hs: Header[] | undefined, name: string): string {
   return hs?.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value ?? "";
 }
 
-type ListMessage = {
-  id: string;
-  threadId?: string;
-  snippet?: string;
-  labelIds?: string[];
-  payload?: { headers?: Header[] };
-};
-
 /** Structured row for JSON output / internal use. */
-function toRow(m: ListMessage): Record<string, unknown> {
+function toRow(item: ListedMessage): Record<string, unknown> {
+  const m = item.m;
   const hs = m.payload?.headers;
   const labels = m.labelIds ?? [];
   return {
@@ -110,14 +142,16 @@ function toRow(m: ListMessage): Record<string, unknown> {
     labels,
     unread: labels.includes("UNREAD"),
     starred: labels.includes("STARRED"),
+    enriched: item.enriched,
   };
 }
 
-function summarize(messages: ListMessage[]): string {
-  if (!messages.length) return "No messages found.";
-  return messages
-    .map((m, i) => {
-      const r = toRow(m);
+function summarize(items: ListedMessage[]): string {
+  if (!items.length) return "No messages found.";
+  return items
+    .map((item, i) => {
+      const m = item.m;
+      const r = toRow(item);
       const flags = [r.unread ? "UNREAD" : "", r.starred ? "STARRED" : ""].filter(Boolean).join(" ");
       return [
         `${i + 1}. [id=${m.id}${m.threadId ? ` thread=${m.threadId}` : ""}]${flags ? ` (${flags})` : ""} ${r.date ?? ""}`.trimEnd(),
@@ -219,7 +253,7 @@ export function registerGmailTools(server: McpServer): void {
     {
       title: "Search Gmail",
       description:
-        "Search messages using Gmail query syntax. Examples: 'from:bob@example.com', 'subject:invoice after:2024/01/01', 'is:unread has:attachment newer_than:30d', 'in:inbox label:work', 'before:2023/12/31 has:attachment size>1M'. Each result includes id, from, to, subject, date, snippet, and unread/starred state in this single call — only call gmail_get_message when you need the full body.",
+        "Search messages using Gmail query syntax. Examples: 'from:bob@example.com', 'subject:invoice after:2024/01/01', 'is:unread has:attachment newer_than:30d', 'in:inbox label:work', 'before:2023/12/31 has:attachment size>1M'. Each result includes id, from, to, subject, date, snippet, unread/starred state, and an `enriched` flag (true = fields verified by the API, so null means truly absent; false = enrichment fetch failed, treat nulls as not-fetched) in this single call — only call gmail_get_message when you need the full body.",
       inputSchema: {
         q: z.string().describe("Gmail search query string"),
         maxResults: z.number().int().min(1).max(100).default(10).describe("Max messages to return (default 10)"),
@@ -229,7 +263,7 @@ export function registerGmailTools(server: McpServer): void {
     async ({ q, maxResults, format }) => {
       try {
         const gmail = await getGmail();
-        const msgs = (await listMessages(gmail, { q, maxResults })) as ListMessage[];
+        const msgs = await listMessages(gmail, { q, maxResults });
         return format === "json" ? jsonResult(msgs.map(toRow)) : text(summarize(msgs));
       } catch (e) {
         return fail(e);
@@ -285,7 +319,7 @@ export function registerGmailTools(server: McpServer): void {
     {
       title: "List messages",
       description:
-        "List recent messages from a label/folder (default INBOX). Each result includes id, from, to, subject, date, snippet, and unread/starred state in this single call. Use gmail_search_messages for full-text search.",
+        "List recent messages from a label/folder (default INBOX). Each result includes id, from, to, subject, date, snippet, unread/starred state, and an `enriched` flag (true = fields verified by the API, so null means truly absent; false = enrichment fetch failed, treat nulls as not-fetched) in this single call. Use gmail_search_messages for full-text search.",
       inputSchema: {
         labelId: z.string().default("INBOX").describe("Label/folder id: INBOX, SENT, DRAFT, STARRED, TRASH, or a custom label name"),
         maxResults: z.number().int().min(1).max(100).default(10).describe("Max messages (default 10)"),
@@ -295,7 +329,7 @@ export function registerGmailTools(server: McpServer): void {
     async ({ labelId, maxResults, format }) => {
       try {
         const gmail = await getGmail();
-        const msgs = (await listMessages(gmail, { labelIds: [labelId], maxResults })) as ListMessage[];
+        const msgs = await listMessages(gmail, { labelIds: [labelId], maxResults });
         return format === "json" ? jsonResult(msgs.map(toRow)) : text(summarize(msgs));
       } catch (e) {
         return fail(e);

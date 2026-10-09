@@ -183,6 +183,14 @@ from, to, subject, date, snippet, and unread/starred state of every message —
 you don't need a `get_message` call per message just to find out who sent what.
 Call `get_message` only when you need the body.
 
+If a list response ever comes back missing headers/snippet, the server
+automatically backfills those messages with lightweight per-message metadata
+fetches — you never need to loop `get_message` for enrichment yourself. Each
+list/search JSON row carries an `enriched` flag: `true` means the header data
+came back from the API, so any `null` field there is a fact (the message has no
+subject, say); `false` means backfill was attempted and failed, so treat that
+row's `null`s as "not fetched", not as absence.
+
 **JSON output:** the read tools (`search_messages`, `list_messages`,
 `get_message`, `list_labels`) accept `format: "json"` (default `"text"`) and
 then return a machine-parseable JSON payload instead of the human-readable
