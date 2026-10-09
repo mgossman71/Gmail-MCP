@@ -200,6 +200,29 @@ summary. Error responses always set `isError: true`.
 (`"STARRED"`) or an array (`["INBOX", "SENT"]`) for `addLabelIds` /
 `removeLabelIds`.
 
+## Testing
+
+```bash
+npm test
+```
+
+Runs typecheck + build, then the test suites — **no Google account, OAuth, or network
+required**:
+
+- **Unit** (`test/unit.test.mjs`) — body decoding (quoted-printable edge cases),
+  list-row mapping and the `enriched` semantics, text summarization.
+- **Smoke** (`test/smoke.test.mjs`) — boots the real built server over HTTP against
+  the bundled mock Google API (`test/mock-google.mjs`), then drives it with real
+  MCP `tools/call` requests: list/search/get in text and JSON, labels, apply-labels,
+  send, error semantics (403/404 → remediation hints), the full calendar toolset
+  (list/create/update/delete/free-time), and the enrichment **backfill** paths —
+  including a mock that returns bare all-null list rows (the reported production
+  symptom) plus a row whose fetch 404s, verifying it degrades to `enriched: false`
+  instead of crashing or lying.
+
+Both suites run automatically on every PR via GitHub Actions (`.github/workflows/test.yml`).
+
+
 ## Troubleshooting
 - **`credentials.json not found`** — you haven't downloaded it, or it isn't named exactly `credentials.json` in the project folder.
 - **`credentials.json is missing client_id / client_secret`** — wrong file; you need the `"installed"` block from a **Desktop app** client.
