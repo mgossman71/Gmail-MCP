@@ -60,6 +60,17 @@ function readToken(): Record<string, unknown> {
 }
 
 async function buildAuth(): Promise<OAuth2Client> {
+  // Test mode (GOOGLE_API_BASE_URL points at a mock API): no Google files are
+  // needed at all — this works on CI, where credentials.json/token.json don't
+  // exist, and it guarantees the tests never read the real token.
+  if (API_BASE) {
+    const client = new OAuth2Client("mock-client-id", "mock-client-secret");
+    client.setCredentials({
+      access_token: "mock-access-token",
+      expiry_date: Date.now() + 3600_000,
+    });
+    return client;
+  }
   const client = clientFromKeyfile();
   if (!existsSync(TOKEN_PATH)) {
     throw new Error(
