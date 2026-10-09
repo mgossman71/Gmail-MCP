@@ -8,8 +8,29 @@ type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean
 function text(s: string): ToolResult {
   return { content: [{ type: "text", text: s }] };
 }
+
+// Turn Google API failures into messages that say what to DO about them.
+function describeError(e: unknown): string {
+  const msg = e instanceof Error ? e.message : String(e);
+  const lower = msg.toLowerCase();
+  if (lower.includes("insufficient scope") || lower.includes("permission denied") || lower.includes(" 403")) {
+    return (
+      msg +
+      " — this looks like a missing OAuth scope. Check the granted/missing scopes at /healthz; " +
+      "if any requested scope is missing, re-run `npm run auth` (or `npm run auth:headless`) with full scopes."
+    );
+  }
+  if (lower.includes("invalid_grant") || lower.includes("rejected the refresh token")) {
+    return msg; // already carries its own remediation steps
+  }
+  if (lower.includes("not found") || lower.includes("not modifyable") || lower.includes("conflict")) {
+    return msg + " — check the input (event ids come from calendar_list_events); for 'conflict', the event may have changed, re-fetch and retry.";
+  }
+  return msg;
+}
+
 function fail(e: unknown): ToolResult {
-  return { content: [{ type: "text", text: `Error: ${e instanceof Error ? e.message : String(e)}` }], isError: true };
+  return { content: [{ type: "text", text: `Error: ${describeError(e)}` }], isError: true };
 }
 
 function calId(id?: string): string {
